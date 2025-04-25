@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         DeviantArt - Blocklist Hider v2.2
+// @name         DeviantArt - Blocklist Hider v2.4
 // @namespace    http://tampermonkey.net/
-// @version      2.2
-// @description  Hides deviations from artists in blocklist (URLs/usernames). Collapses space.
+// @version      2.4
+// @description  Hides deviations from artists in blocklist (URLs/usernames) AND usernames containing specific keywords. Collapses space. Processes immediately on change detection.
 // @author       nekohacker591
 // @match        *://*.deviantart.com/*
 // @grant        GM_xmlhttpRequest
@@ -16,6 +16,31 @@
 
     // --- CONFIGURATION ---
     const blocklistUrl = 'https://raw.githubusercontent.com/nekohacker591/deviantnotartblacklist/main/blacklist.txt'; // Use the correct RAW url
+
+    // *** Wildcard Keywords to Block (case-insensitive) ***
+    const wildcardBlockKeywords = [
+        'photography',
+        'stock',
+        '3d',
+        'model',
+        'nature',
+        'ero',
+        'nude',
+        'onlyfans',
+        'of',
+        'promo',
+        'porn',
+        'blender',
+        'studio',
+        'graphy',
+        'imagery',
+        'subscribe',
+        'photo'
+
+
+
+        // Add more keywords as strings in this array if needed
+    ].map(keyword => keyword.toLowerCase());
     // --- END CONFIGURATION ---
 
     // --- Sanity Check ---
@@ -33,31 +58,26 @@
     let blockedArtists = new Set();
     let hideStyleAdded = false;
 
-    // *** UPDATED HIDE STYLES FUNCTION ***
     function addHideStyles() {
         if (hideStyleAdded) return;
         GM_addStyle(`
             .da-blocked-deviation-container {
-                 /* The nuclear option: Remove element completely from layout */
                  display: none !important;
-
-                 /* These might be redundant with display:none, but can't hurt */
                  height: 0 !important;
                  width: 0 !important;
                  margin: 0 !important;
                  padding: 0 !important;
-                 border: none !important; /* Explicitly remove borders */
+                 border: none !important;
                  font-size: 0 !important;
                  overflow: hidden !important;
-                 visibility: hidden !important; /* Keep this for belt-and-suspenders */
+                 visibility: hidden !important;
                  float: none !important;
                  position: static !important;
             }
         `);
         hideStyleAdded = true;
-        console.log("DA Blocklist Hider: Added CSS styles for hiding (using display:none).");
+        console.log("DA Blocklist Hider: Added CSS styles for hiding.");
     }
-    // *** END OF UPDATED FUNCTION ***
 
     function fetchBlocklist() {
         console.log("DA Blocklist Hider: Fetching blocklist from", blocklistUrl);
@@ -84,29 +104,28 @@
                     lines.forEach(line => {
                         const match = line.match(urlPattern);
                         if (match && match[1]) {
-                            const extractedUsername = match[1].toLowerCase();
-                            usernames.add(extractedUsername);
+                            usernames.add(match[1].toLowerCase());
                         } else if (line.length > 0 && !line.includes('/') && !line.includes('.')) {
-                            const plainUsername = line.toLowerCase();
-                            usernames.add(plainUsername);
+                            usernames.add(line.toLowerCase());
                         } else {
                              console.warn(`DA Blocklist Hider: Skipping potentially invalid line in blocklist: "${line}"`);
                         }
                     });
 
                     blockedArtists = usernames;
-                    console.log(`DA Blocklist Hider: Processed ${blockedArtists.size} artists from the blocklist.`);
+                    console.log(`DA Blocklist Hider: Processed ${blockedArtists.size} artists from the explicit blocklist.`);
                     if (blockedArtists.size > 0) {
                          console.log("Blocked artists (first 10):", Array.from(blockedArtists).slice(0, 10).join(', ') + (blockedArtists.size > 10 ? '...' : ''));
                     }
-
                     if (blockedArtists.size === 0) {
-                        console.warn("DA Blocklist Hider: Blocklist resulted in zero valid usernames!");
+                        console.warn("DA Blocklist Hider: Explicit blocklist resulted in zero valid usernames!");
                     }
+                    console.log(`DA Blocklist Hider: Added ${wildcardBlockKeywords.length} wildcard keywords: [${wildcardBlockKeywords.join(', ')}]`);
 
                     addHideStyles();
-                    setTimeout(processDeviations, 500);
-                    observeMutations();
+                    // Run initial processing slightly delayed to allow page initial render
+                    setTimeout(processDeviations, 250);
+                    observeMutations(); // Start watching for dynamic content
                 } else {
                     console.error(`DA Blocklist Hider: Failed to fetch blocklist. Status: ${response.status} ${response.statusText}. URL: ${blocklistUrl}`);
                     alert(`DA Blocklist Hider: Could not load blocklist. Status: ${response.status}. Check console (F12) & URL.`);
@@ -119,24 +138,44 @@
         });
     }
 
-    function processDeviations() {
-        if (blockedArtists.size === 0) return;
+    function checkWildcardKeywords(username) {
+        if (!username || wildcardBlockKeywords.length === 0) {
+            return false;
+        }
+        return wildcardBlockKeywords.some(keyword => username.includes(keyword));
+    }
 
-        const artistLinks = document.querySelectorAll('a[data-username]:not(.da-blocked-link)');
+    function processDeviations() {
+        if (blockedArtists.size === 0 && wildcardBlockKeywords.length === 0) return;
+
+        // Select links that haven't been processed yet
+        const artistLinks = document.querySelectorAll('a[data-username]:not(.da-processed-link)');
+        if (artistLinks.length === 0) return; // Nothing new to process
+
+        // console.log(`DA Blocklist Hider: Processing ${artistLinks.length} new links...`); // Optional: uncomment for verbose logging
 
         artistLinks.forEach(link => {
-            link.classList.add('da-blocked-link');
+            link.classList.add('da-processed-link'); // Mark immediately to prevent reprocessing in rapid calls
 
             const username = link.dataset.username.toLowerCase();
+            const isBlockedByList = blockedArtists.has(username);
+            const isBlockedByWildcard = !isBlockedByList && checkWildcardKeywords(username);
 
-            if (blockedArtists.has(username)) {
+            let blockReason = '';
+            if (isBlockedByList) {
+                blockReason = 'explicit list';
+            } else if (isBlockedByWildcard) {
+                blockReason = 'wildcard keyword';
+            }
+
+            if (blockReason) {
+                // --- Find the container to hide ---
                 const innerContainer = link.closest('div._3Y0hT._3oBlM');
                 const gridItemContainer = innerContainer ? innerContainer.parentElement : null;
                 const deviationCardContainer = link.closest('div[data-testid="deviation_card"]');
                 const articleContainer = link.closest('article[data-hook="deviation_std"]');
                 const cellContainer = link.closest('div[data-hook="deviation_cell"]');
-                // Add more potential top-level container selectors here if needed
-                // const someOtherContainer = link.closest('.some-other-class');
+                // Add more potential selectors here if needed
 
                 let containerToHide = null;
 
@@ -145,23 +184,21 @@
                 } else if (deviationCardContainer) {
                     containerToHide = deviationCardContainer;
                 } else if (articleContainer) {
-                     containerToHide = articleContainer;
+                    containerToHide = articleContainer;
                 } else if (cellContainer) {
-                     containerToHide = cellContainer;
-                }
-                // else if (someOtherContainer) { // Example if you find another wrapper
-                //     containerToHide = someOtherContainer;
-                // }
-                 else if (innerContainer) {
+                    containerToHide = cellContainer;
+                } else if (innerContainer) {
                     containerToHide = innerContainer;
-                    console.warn(`DA Blocklist Hider: Using fallback inner container for ${username}.`);
+                    console.warn(`DA Blocklist Hider: Using fallback inner container for ${username} (Blocked via ${blockReason}).`);
                 }
+                // --- End Container Finding ---
 
                 if (containerToHide && !containerToHide.classList.contains('da-blocked-deviation-container')) {
-                    console.log(`DA Blocklist Hider: Hiding & Collapsing deviation by blocked artist: ${username}`);
+                    // console.log(`DA Blocklist Hider: Hiding deviation by ${username} (Reason: ${blockReason})`); // Make logging less noisy maybe
                     containerToHide.classList.add('da-blocked-deviation-container');
                 } else if (!containerToHide && !link.closest('.da-blocked-deviation-container')) {
-                    console.warn(`DA Blocklist Hider: Could not find suitable container for blocked artist link: ${username}`, link);
+                     // Only log warning if we failed AND it's not already hidden by a parent container check
+                    console.warn(`DA Blocklist Hider: Could not find suitable container for blocked artist link: ${username} (Reason: ${blockReason})`, link);
                 }
             }
         });
@@ -169,8 +206,7 @@
 
     function observeMutations() {
         const targetNode = document.body;
-        const config = { childList: true, subtree: true };
-        let debounceTimer;
+        const config = { childList: true, subtree: true }; // Watch for nodes being added anywhere in the body
 
         const callback = function(mutationsList, observer) {
             let potentiallyRelevantChange = false;
@@ -178,7 +214,8 @@
                 if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
                     for (const node of mutation.addedNodes) {
                         if (node.nodeType === Node.ELEMENT_NODE) {
-                            if (node.matches('a[data-username]:not(.da-blocked-link)') || node.querySelector('a[data-username]:not(.da-blocked-link)')) {
+                            // Check efficiently if the added node itself or any descendant is an unprocessed link
+                            if (node.matches('a[data-username]:not(.da-processed-link)') || node.querySelector('a[data-username]:not(.da-processed-link)')) {
                                 potentiallyRelevantChange = true;
                                 break;
                             }
@@ -188,18 +225,21 @@
                 if (potentiallyRelevantChange) break;
             }
 
+            // *** CHANGE HERE: Removed debounce timer ***
+            // If relevant changes were detected, run processDeviations IMMEDIATELY.
             if (potentiallyRelevantChange) {
-                clearTimeout(debounceTimer);
-                debounceTimer = setTimeout(processDeviations, 0);
+                // console.log("DA Blocklist Hider: Detected relevant DOM change, processing immediately."); // Optional: uncomment for debug
+                processDeviations();
             }
         };
 
         const observer = new MutationObserver(callback);
         observer.observe(targetNode, config);
-        console.log("DA Blocklist Hider: MutationObserver watching for new content.");
+        console.log("DA Blocklist Hider: MutationObserver watching for new content (Immediate Processing Mode).");
     }
 
     // --- Start ---
+    addHideStyles();
     fetchBlocklist();
 
 })();
